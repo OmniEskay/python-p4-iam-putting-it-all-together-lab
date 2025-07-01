@@ -1,131 +1,167 @@
 #!/usr/bin/env python3
 
-from flask import request, session, make_response
+from flask import request, session
 from flask_restful import Resource
 from sqlalchemy.exc import IntegrityError
+from flask_migrate import Migrate
 
 from config import app, db, api
 from models import User, Recipe
 
+# Initialize Flask-Migrate
+migrate = Migrate(app, db)
+
+# Signup Route
 class Signup(Resource):
     def post(self):
-        """
-        Handles user signup. Creates a new user and logs them in.
-        Relies on model validations to catch errors.
-        """
         data = request.get_json()
-        
+
+        username = data.get('username')
+        password = data.get('password')
+        image_url = data.get('image_url')
+        bio = data.get('bio')
+
         try:
             new_user = User(
-                username=data.get('username'),
-                image_url=data.get('image_url'),
-                bio=data.get('bio')
+                username=username,
+                image_url=image_url,
+                bio=bio
             )
-
-            # Set password using the password_hash setter, which has validation
-            new_user.password_hash = data.get('password')
+            new_user.password_hash = password  # triggers bcrypt hash
 
             db.session.add(new_user)
             db.session.commit()
-            
-            # Set session user_id after successful creation
+
             session['user_id'] = new_user.id
-            return make_response(new_user.to_dict(rules=('-recipes', '-_password_hash')), 201)
-        except (IntegrityError, ValueError) as e:
-            # Handle unique constraint violation for username or other validation errors
+
+            return {
+                'id': new_user.id,
+                'username': new_user.username,
+                'image_url': new_user.image_url,
+                'bio': new_user.bio
+            }, 201
+
+        except IntegrityError:
             db.session.rollback()
-            
-            error_message = str(e)
-            # Customize message for unique username constraint
-            if isinstance(e, IntegrityError):
-                 error_message = "Username already exists."
+            return {'errors': ['Username must be unique.']}, 422
 
-            return make_response({"errors": [error_message]}, 422)
+        except Exception as e:
+            return {'errors': [str(e)]}, 422
 
+# Check Session Route
 class CheckSession(Resource):
     def get(self):
-        """
-        Checks if a user is logged in by verifying the session.
-        """
         user_id = session.get('user_id')
-        if user_id:
-            user = User.query.get(user_id)
-            if user:
-                return make_response(user.to_dict(rules=('-recipes', '-_password_hash')), 200)
-        return make_response({'error': 'Unauthorized'}, 401)
 
+        if not user_id:
+            return {'error': 'Unauthorized'}, 401
+
+        user = User.query.get(user_id)
+        if not user:
+            return {'error': 'User not found'}, 404
+
+        return {
+            'id': user.id,
+            'username': user.username,
+            'image_url': user.image_url,
+            'bio': user.bio
+        }, 200
+
+# Login Route
 class Login(Resource):
     def post(self):
-        """
-        Logs a user in by authenticating their credentials.
-        """
         data = request.get_json()
         username = data.get('username')
         password = data.get('password')
 
-        user = User.query.filter(User.username == username).first()
+        user = User.query.filter_by(username=username).first()
 
         if user and user.authenticate(password):
             session['user_id'] = user.id
-            return make_response(user.to_dict(rules=('-recipes', '-_password_hash')), 200)
-        
-        return make_response({'error': 'Invalid username or password'}, 401)
+            return {
+                'id': user.id,
+                'username': user.username,
+                'image_url': user.image_url,
+                'bio': user.bio
+            }, 200
 
+        return {'error': 'Invalid username or password'}, 401
+
+# Logout Route
 class Logout(Resource):
     def delete(self):
-        """
-        Logs a user out by clearing their session.
-        """
-        if session.get('user_id'):
-            session.pop('user_id', None)
-            return make_response('', 204)
-        
-        return make_response({'error': 'Unauthorized'}, 401)
+        user_id = session.get('user_id')
+        if user_id:
+            session.pop('user_id')
+            return {}, 204
+        return {'error': 'No active session'}, 401
 
+# Recipe Index Route
+# Recipe Index Route
 class RecipeIndex(Resource):
     def get(self):
-        """
-        Returns all recipes if the user is logged in.
-        """
-        if session.get('user_id'):
-            recipes = Recipe.query.all()
-            # Use serialization rules to include the nested user object
-            recipes_dict = [recipe.to_dict() for recipe in recipes]
-            return make_response(recipes_dict, 200)
-        
-        return make_response({'error': 'Unauthorized'}, 401)
-
-    def post(self):
-        """
-        Creates a new recipe if the user is logged in.
-        """
         user_id = session.get('user_id')
         if not user_id:
-            return make_response({'error': 'Unauthorized'}, 401)
+            return {'error': 'Unauthorized'}, 401
+
+        user = User.query.get(user_id)
+        if not user:
+            return {'error': 'User not found'}, 404
+
+        recipes = [
+            {
+                'id': recipe.id,
+                'title': recipe.title,
+                'instructions': recipe.instructions,
+                'minutes_to_complete': recipe.minutes_to_complete
+            } for recipe in user.recipes
+        ]
+
+        return recipes, 200
+
+    def post(self):
+        user_id = session.get('user_id')
+        if not user_id:
+            return {'error': 'Unauthorized'}, 401
 
         data = request.get_json()
+
+        title = data.get('title')
+        instructions = data.get('instructions')
+        minutes_to_complete = data.get('minutes_to_complete')
+
+        if not title or not instructions or not minutes_to_complete:
+            return {'errors': ['Missing required fields.']}, 422
+
         try:
             new_recipe = Recipe(
-                title=data.get('title'),
-                instructions=data.get('instructions'),
-                minutes_to_complete=data.get('minutes_to_complete'),
+                title=title,
+                instructions=instructions,
+                minutes_to_complete=minutes_to_complete,
                 user_id=user_id
             )
             db.session.add(new_recipe)
             db.session.commit()
-            return make_response(new_recipe.to_dict(), 201)
-        except ValueError as e:
+
+            return {
+                'id': new_recipe.id,
+                'title': new_recipe.title,
+                'instructions': new_recipe.instructions,
+                'minutes_to_complete': new_recipe.minutes_to_complete
+            }, 201
+
+        except Exception as e:
             db.session.rollback()
-            return make_response({"errors": [str(e)]}, 422)
+            return {'errors': [str(e)]}, 422
 
 
-# Add resources to the API
+# Register API resources
 api.add_resource(Signup, '/signup', endpoint='signup')
 api.add_resource(CheckSession, '/check_session', endpoint='check_session')
 api.add_resource(Login, '/login', endpoint='login')
 api.add_resource(Logout, '/logout', endpoint='logout')
 api.add_resource(RecipeIndex, '/recipes', endpoint='recipes')
 
-
+# Run the app
 if __name__ == '__main__':
     app.run(port=5555, debug=True)
